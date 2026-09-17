@@ -415,10 +415,10 @@ class MammothModa2Qwen2ForCausalLM(nn.Module, SupportsPP):
             return self.embed_tokens(input_ids)
 
         # Shape-static dual-vocab lookup: no host-side .any()/.all() branches and
-        # no data-dependent scatter, so the same code is safe under torch.compile,
-        # CUDA graph capture, and async input preparation. Ids are clamped to 0
-        # for the table they don't belong to; the discarded lane is masked out by
-        # the final select, keeping both gathers in-bounds by construction.
+        # no data-dependent scatter, so the same code is safe under torch.compile
+        # and CUDA graph capture. Ids are clamped to 0 for the table they don't
+        # belong to; the discarded lane is masked out by the final select,
+        # keeping both gathers in-bounds by construction.
         gen_start = int(self.gen_vocab_start_index)
         gen_mask = input_ids >= gen_start
         base_ids = torch.where(gen_mask, torch.zeros_like(input_ids), input_ids)

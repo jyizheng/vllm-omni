@@ -9,10 +9,15 @@ stages:
     max_num_seqs: 100
     max_model_len: 8192
     gpu_memory_utilization: 0.5
-    # torch.compile piecewise + CUDA graphs. Do not use cudagraph_mode FULL
-    # without compilation: the dual-expert (und/gen) routing is captured with
-    # the dummy all-text mask and replays the wrong expert during t2i decode.
+    # torch.compile piecewise + CUDA graphs. PIECEWISE keeps the Python
+    # forward (and the per-step dual-expert routing decisions) running every
+    # step; only the compiled partitions are graph-captured. Do not use
+    # cudagraph_mode FULL: the dual-expert (und/gen) routing would be captured
+    # with the dummy all-text mask and replay the wrong expert during t2i
+    # decode.
     enforce_eager: false
+    compilation_config:
+      cudagraph_mode: PIECEWISE
     # Async scheduling is unsafe for embed-early multimodal models: the input
     # embedding runs during input prep, before the previous step's sampled
     # token id is written back, and gathers the -1 sentinel (OOB crash at
