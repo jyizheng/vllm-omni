@@ -119,6 +119,14 @@ def get_accumulation_strategy(modality: OutputModality) -> TensorAccumulationStr
     """Determine tensor merge strategy from the multimodal flags."""
     if OutputModality.AUDIO in modality:
         return TensorAccumulationStrategy.CONCAT_LAST
-    if OutputModality.IMAGE in modality or OutputModality.LATENT in modality:
+    if OutputModality.LATENT in modality:
+        # Latent payloads are cumulative snapshots (LATENT is in
+        # NON_DRAINABLE_MODALITIES): every emission carries the full
+        # accumulated hidden states, so keep the latest snapshot instead of
+        # concatenating. Concatenation double-counts when a request emits
+        # more than once (e.g. a stop-token finish emits at the EOS step and
+        # again on the final flush).
+        return TensorAccumulationStrategy.REPLACE
+    if OutputModality.IMAGE in modality:
         return TensorAccumulationStrategy.CONCAT_DIM0
     return TensorAccumulationStrategy.CONCAT_DIM0  # default
