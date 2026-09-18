@@ -82,6 +82,16 @@ def _accumulate_segment_tpot(record: dict[str, object], *, elapsed_ms: float, ne
     record["vllm_tpot_ms"] = total_elapsed_ms / float(total_intervals)
 
 
+def _dim0_rows(value) -> int:
+    """Total dim-0 rows of a tensor or deferred list of tensors (0 if none)."""
+    if value is None:
+        return 0
+    if isinstance(value, torch.Tensor):
+        return int(value.shape[0]) if value.ndim > 0 else 0
+    if isinstance(value, (list, tuple)):
+        return sum(_dim0_rows(v) for v in value)
+    return 0
+
 class OmniRequestState(RequestState):
     """Request state for omni models, tracking multimodal outputs.
 
@@ -132,6 +142,16 @@ class OmniRequestState(RequestState):
             incoming = MultimodalPayload.from_raw(payload, modality_key)
             if incoming is not None:
                 replace_snapshot_keys(self.mm_accumulated, incoming)
+                # Latent emissions are per-step chunks, except that a
+                # stop-token finish additionally delivers the full cumulative
+                # snapshot. A payload at least as long as everything
+                # accumulated so far supersedes the chunks; appending it
+                # would double-count the hidden states.
+                if modality_key == "latent":
+                    inc_rows = _dim0_rows(incoming.tensors.get("latent"))
+                    acc_rows = _dim0_rows(self.mm_accumulated.tensors.get("latent"))
+                    if inc_rows and acc_rows and inc_rows >= acc_rows:
+                        self.mm_accumulated.tensors.pop("latent", None)
                 self.mm_accumulated = self.mm_accumulated.merged_with(incoming)
         except (ValueError, TypeError, RuntimeError):
             logger.exception("Error accumulating multimodal tensor")
