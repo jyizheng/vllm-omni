@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 
 from vllm_omni.model_executor.models.mammoth_moda2.mammoth_moda2 import (
-    MammothModa2Qwen2Model,
+    MammothModa2Qwen2ForCausalLM,
 )
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
@@ -32,7 +32,7 @@ class _FakeModel:
         self.gen_embed_tokens = nn.Embedding(GEN_SIZE, HIDDEN)
 
     def get_input_embeddings(self, input_ids):
-        return MammothModa2Qwen2Model.get_input_embeddings(self, input_ids)
+        return MammothModa2Qwen2ForCausalLM.get_input_embeddings(self, input_ids)
 
 
 def _reference(model, input_ids):
