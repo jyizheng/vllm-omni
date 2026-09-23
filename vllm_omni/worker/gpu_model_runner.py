@@ -1359,6 +1359,9 @@ class OmniGPUModelRunner(GPUModelRunner):
             model_kwargs_extra["model_intermediate_buffer"] = buffer_map
             # Backward compatible: also emit old name
             model_kwargs_extra["runtime_additional_information"] = buffer_map
+            setter = getattr(self.model, "set_runtime_additional_information", None)
+            if callable(setter):
+                setter(buffer_map)
         except Exception as e:
             logger.error(f"[OMNI DEBUG] Error building model_kwargs_extra: {e}")
             import traceback

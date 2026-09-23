@@ -68,15 +68,21 @@ def _mean_time_per_output_token_ms(stats: RequestStateStats) -> float:
 
 
 
-def _dim0_rows(value) -> int:
-    """Total dim-0 rows of a tensor or deferred list of tensors (0 if none)."""
-    if value is None:
-        return 0
-    if isinstance(value, torch.Tensor):
-        return int(value.shape[0]) if value.ndim > 0 else 0
-    if isinstance(value, (list, tuple)):
-        return sum(_dim0_rows(v) for v in value)
-    return 0
+def _is_cumulative_snapshot(incoming, accumulated) -> bool:
+    if accumulated is None or incoming.ndim == 0:
+        return False
+    chunks = accumulated if isinstance(accumulated, (list, tuple)) else [accumulated]
+    offset = 0
+    for chunk in chunks:
+        if not isinstance(chunk, torch.Tensor) or chunk.ndim == 0:
+            return False
+        n = int(chunk.shape[0])
+        if offset + n > int(incoming.shape[0]):
+            return False
+        if incoming.shape[1:] != chunk.shape[1:] or not torch.equal(incoming[offset : offset + n], chunk):
+            return False
+        offset += n
+    return offset > 0
 
 class OmniRequestState(RequestState):
     """Request state for omni models, tracking multimodal outputs.
@@ -130,13 +136,13 @@ class OmniRequestState(RequestState):
                 replace_snapshot_keys(self.mm_accumulated, incoming)
                 # Latent emissions are per-step chunks, except that a
                 # stop-token finish additionally delivers the full cumulative
-                # snapshot. A payload at least as long as everything
-                # accumulated so far supersedes the chunks; appending it
-                # would double-count the hidden states.
+                # snapshot. Supersede only when the incoming payload provably
+                # contains the accumulated chunks (prefix bitwise-equal).
                 if modality_key == "latent":
-                    inc_rows = _dim0_rows(incoming.tensors.get("latent"))
-                    acc_rows = _dim0_rows(self.mm_accumulated.tensors.get("latent"))
-                    if inc_rows and acc_rows and inc_rows >= acc_rows:
+                    inc = incoming.tensors.get("latent")
+                    if isinstance(inc, torch.Tensor) and _is_cumulative_snapshot(
+                        inc, self.mm_accumulated.tensors.get("latent")
+                    ):
                         self.mm_accumulated.tensors.pop("latent", None)
                 self.mm_accumulated = self.mm_accumulated.merged_with(incoming)
         except (ValueError, TypeError, RuntimeError):

@@ -1,21 +1,17 @@
 """Regression tests for latent accumulation with terminal snapshots.
 
 Latent emissions are per-step chunks, except that a stop-token finish
-additionally delivers the full cumulative snapshot. The accumulator must
-treat a payload at least as long as everything accumulated so far as a
-superseding snapshot; appending it double-counts the hidden states and
-breaks the downstream prompt+generated length invariant.
+additionally delivers the full cumulative snapshot. The accumulator replaces
+the accumulated chunks only when the incoming payload provably contains them
+(at least as many rows, prefix bitwise-equal); anything else — single-row
+steps, equal-sized prefill slices, growing chunks — concatenates as before.
 """
 
 import pytest
 import torch
 
 from vllm_omni.outputs.mm_outputs import MultimodalPayload
-from vllm_omni.outputs.output_modality import (
-    OutputModality,
-    TensorAccumulationStrategy,
-    get_accumulation_strategy,
-)
+from vllm_omni.outputs.output_modality import OutputModality
 from vllm_omni.outputs.output_processor import OmniRequestState
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
@@ -32,18 +28,14 @@ class _FakeState:
         OmniRequestState.add_multimodal_tensor(self, {"latent": tensor}, "latent")
 
     def consolidated(self):
-        self.mm_accumulated.consolidate_tensors(get_accumulation_strategy(OutputModality.LATENT))
+        self.mm_accumulated.consolidate_tensors(OutputModality.LATENT)
         return self.mm_accumulated.tensors["latent"]
-
-
-def test_latent_strategy_is_concat_dim0():
-    assert get_accumulation_strategy(OutputModality.LATENT) is TensorAccumulationStrategy.CONCAT_DIM0
 
 
 def test_per_step_chunks_concatenate():
     state = _FakeState()
-    chunks = [torch.randn(1, 8) for _ in range(5)]
     prefill = torch.randn(40, 8)
+    chunks = [torch.randn(1, 8) for _ in range(5)]
     state.add(prefill)
     for c in chunks:
         state.add(c)
@@ -52,19 +44,56 @@ def test_per_step_chunks_concatenate():
     assert torch.equal(out, torch.cat([prefill, *chunks], dim=0))
 
 
-def test_terminal_snapshot_supersedes_chunks():
-    # Stop-token finish: per-step chunks accumulate, then the final flush
-    # delivers the full cumulative snapshot. The snapshot must replace the
-    # chunks, not be appended after them.
+def test_one_row_then_one_row_concatenates():
+    # A one-token prompt: one prefill row, then a one-row decode step. The
+    # decode step has equal length but a different prefix, so it must append.
     state = _FakeState()
-    state.add(torch.randn(40, 8))  # prefill hidden states
-    for _ in range(10):
-        state.add(torch.randn(1, 8))  # decode steps
-    final_snapshot = torch.randn(52, 8)  # 40 prompt + 12 generated
-    state.add(final_snapshot.clone())
+    prefill = torch.randn(1, 8)
+    step = torch.randn(1, 8)
+    state.add(prefill.clone())
+    state.add(step.clone())
+    out = state.consolidated()
+    assert out.shape == (2, 8)
+    assert torch.equal(out, torch.cat([prefill, step], dim=0))
+
+
+def test_equal_sized_prefill_slices_concatenate():
+    # Two 32-row chunked-prefill slices with distinct contents.
+    state = _FakeState()
+    s1, s2 = torch.randn(32, 8), torch.randn(32, 8)
+    state.add(s1.clone())
+    state.add(s2.clone())
+    out = state.consolidated()
+    assert out.shape == (64, 8)
+    assert torch.equal(out, torch.cat([s1, s2], dim=0))
+
+
+def test_growing_chunks_concatenate():
+    # A longer chunk that does not duplicate the accumulated prefix appends.
+    state = _FakeState()
+    s1, s2 = torch.randn(4, 8), torch.randn(8, 8)
+    state.add(s1.clone())
+    state.add(s2.clone())
+    out = state.consolidated()
+    assert out.shape == (12, 8)
+    assert torch.equal(out, torch.cat([s1, s2], dim=0))
+
+
+def test_terminal_snapshot_supersedes_chunks():
+    # Stop-token finish: the final flush delivers the full cumulative
+    # snapshot (prefix bitwise-equal to the accumulated chunks, plus the
+    # trailing steps). It must replace the chunks, not be appended.
+    state = _FakeState()
+    prefill = torch.randn(40, 8)
+    steps = [torch.randn(1, 8) for _ in range(10)]
+    state.add(prefill.clone())
+    for c in steps:
+        state.add(c.clone())
+    snapshot = torch.cat([prefill, *steps, torch.randn(2, 8)], dim=0)  # + 2 trailing rows
+    state.add(snapshot.clone())
     out = state.consolidated()
     assert out.shape == (52, 8)
-    assert torch.equal(out, final_snapshot)
+    assert torch.equal(out, snapshot)
 
 
 def test_single_snapshot_passthrough():

@@ -662,6 +662,9 @@ class MammothModa2ARForConditionalGeneration(Qwen2_5_VLForConditionalGeneration)
         # These are passed by the vllm-omni runner via kwargs, so caching them in the model is sufficient.
         self._last_runtime_additional_information: list[dict[str, Any]] | None = None
 
+    def set_runtime_additional_information(self, runtime_infos: Any) -> None:
+        self._last_runtime_additional_information = runtime_infos if isinstance(runtime_infos, list) else None
+
     def _apply_t2i_token_constraints(self, logits: torch.Tensor) -> torch.Tensor:
         """Applies per-request token constraints.
 
@@ -825,6 +828,9 @@ class MammothModa2Qwen3ARForConditionalGeneration(Qwen3VLForConditionalGeneratio
         runtime_infos = kwargs.get("runtime_additional_information")
         self._last_runtime_additional_information = runtime_infos if isinstance(runtime_infos, list) else None
         return super().forward(*args, **kwargs)
+
+    def set_runtime_additional_information(self, runtime_infos: Any) -> None:
+        self._last_runtime_additional_information = runtime_infos if isinstance(runtime_infos, list) else None
 
     def compute_logits(self, hidden_states: torch.Tensor):
         logits = super().compute_logits(hidden_states)
