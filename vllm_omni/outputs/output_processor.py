@@ -26,6 +26,7 @@ from vllm_omni.outputs.mm_outputs import MultimodalCompletionOutput, MultimodalP
 from vllm_omni.outputs.multimodal_accumulation import (
     drain_delta_payload,
     is_non_final_delta_audio_chunk,
+    _payload_meta_value,
     replace_snapshot_keys,
 )
 from vllm_omni.outputs.output_modality import OutputModality
@@ -82,27 +83,11 @@ def _accumulate_segment_tpot(record: dict[str, object], *, elapsed_ms: float, ne
     record["vllm_tpot_ms"] = total_elapsed_ms / float(total_intervals)
 
 
-def _is_cumulative_snapshot(incoming: torch.Tensor, accumulated) -> bool:
-    """True iff *incoming* bitwise-contains everything in *accumulated* as its prefix.
-
-    *accumulated* is a tensor or a deferred list of tensors (concat order).
-    An incoming payload that satisfies this is a cumulative snapshot: replacing
-    the accumulated chunks with it cannot lose data.
-    """
-    if accumulated is None or incoming.ndim == 0:
-        return False
-    chunks = accumulated if isinstance(accumulated, (list, tuple)) else [accumulated]
-    offset = 0
-    for chunk in chunks:
-        if not isinstance(chunk, torch.Tensor) or chunk.ndim == 0:
-            return False
-        n = int(chunk.shape[0])
-        if offset + n > int(incoming.shape[0]):
-            return False
-        if incoming.shape[1:] != chunk.shape[1:] or not torch.equal(incoming[offset : offset + n], chunk):
-            return False
-        offset += n
-    return offset > 0
+def _payload_is_full_snapshot(incoming) -> bool:
+    value = _payload_meta_value(incoming, "full_payload_snapshot")
+    if isinstance(value, torch.Tensor):
+        return value.numel() == 1 and bool(value.reshape(()).item())
+    return bool(value)
 
 
 class OmniRequestState(RequestState):
@@ -157,19 +142,13 @@ class OmniRequestState(RequestState):
                 replace_snapshot_keys(self.mm_accumulated, incoming)
                 # Latent emissions are per-step chunks, except that a
                 # stop-token finish additionally delivers the full cumulative
-                # snapshot. Supersede the accumulated chunks only when the
-                # incoming payload provably contains them: at least as many
-                # rows, and its prefix equal to everything accumulated so
-                # far. Dropping data that the incoming payload duplicates is
-                # lossless by construction; any other payload (equal-sized
-                # prefill slices, single-row steps, growing chunks) fails the
-                # prefix check and concatenates as before.
-                if modality_key == "latent":
-                    inc = incoming.tensors.get("latent")
-                    if isinstance(inc, torch.Tensor) and _is_cumulative_snapshot(
-                        inc, self.mm_accumulated.tensors.get("latent")
-                    ):
-                        self.mm_accumulated.tensors.pop("latent", None)
+                # snapshot. The producer declares that explicitly
+                # (meta.full_payload_snapshot, set where the full payload is
+                # materialized); chunk and snapshot payloads are never told
+                # apart by their values, which cannot distinguish a snapshot
+                # from a legitimate identical next chunk.
+                if modality_key == "latent" and _payload_is_full_snapshot(incoming):
+                    self.mm_accumulated.tensors.pop("latent", None)
                 self.mm_accumulated = self.mm_accumulated.merged_with(incoming)
         except (ValueError, TypeError, RuntimeError):
             logger.exception("Error accumulating multimodal tensor")

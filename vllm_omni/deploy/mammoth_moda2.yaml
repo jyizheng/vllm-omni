@@ -10,12 +10,16 @@ stages:
     max_model_len: 8192
     gpu_memory_utilization: 0.5
     # torch.compile piecewise + CUDA graphs (vLLM's FULL_AND_PIECEWISE
-    # default, pinned explicitly). PIECEWISE alone regresses below eager
-    # (compiled kernels without full-graph launch amortization); the win
-    # comes from the FULL decode graphs. Do not use cudagraph_mode FULL
-    # without compilation: the dual-expert (und/gen) routing would be
-    # captured with the dummy all-text mask and replay the wrong expert
-    # during t2i decode (#7318).
+    # default, pinned explicitly). Measured on B300 (greedy, seed 42):
+    # eager 55.6s, PIECEWISE 109.1s (compiled kernels without full-graph
+    # launch amortization), FULL_AND_PIECEWISE 26.6s; the win comes from
+    # the FULL decode graphs. FULL capture is valid for this model only
+    # because the omni runner feeds the decoder inputs_embeds
+    # (input_ids=None), so the captured forward takes moe_forward's
+    # mask-is-None path — the same expert routing eager uses. moe_forward
+    # refuses capture with a live gen_token_mask (its host-side routing
+    # branches would be frozen into the graph; #7318 is the wrong-expert
+    # replay this caused under FULL without compilation).
     enforce_eager: false
     compilation_config:
       cudagraph_mode: FULL_AND_PIECEWISE
