@@ -112,9 +112,7 @@ def test_materialize_full_payload_entry_sets_flag():
     )
 
     chunks = {"hidden": [torch.randn(3, 8), torch.randn(1, 8)]}
-    output, request = _OmniConnectorPayloadTransportMixin._materialize_full_payload_entry(
-        (chunks, {}, 4, "req")
-    )
+    output, request = _OmniConnectorPayloadTransportMixin._materialize_full_payload_entry((chunks, {}, 4, "req"))
     assert output["hidden"].shape == (4, 8)
     flag = output["meta.full_payload_snapshot"]
     assert isinstance(flag, torch.Tensor) and bool(flag)

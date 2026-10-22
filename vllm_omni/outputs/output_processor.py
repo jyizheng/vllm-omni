@@ -24,9 +24,9 @@ from vllm_omni.data_entry_keys import unflatten_payload
 from vllm_omni.outputs import OmniRequestOutput
 from vllm_omni.outputs.mm_outputs import MultimodalCompletionOutput, MultimodalPayload
 from vllm_omni.outputs.multimodal_accumulation import (
+    _payload_meta_value,
     drain_delta_payload,
     is_non_final_delta_audio_chunk,
-    _payload_meta_value,
     replace_snapshot_keys,
 )
 from vllm_omni.outputs.output_modality import OutputModality
