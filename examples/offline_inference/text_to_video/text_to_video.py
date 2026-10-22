@@ -235,7 +235,7 @@ def parse_extra_body(value: str) -> dict[str, Any]:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Generate a video from a text prompt. "
-        "Supports Wan2.2, HunyuanVideo-1.5, Helios, LingBot-Video, MAGI-2, "
+        "Supports Wan2.2, HunyuanVideo-1.5, Helios, LingBot-Video, MAGI-2, Kandinsky 6, "
         "and other text-to-video models."
     )
     parser.add_argument(
@@ -326,6 +326,18 @@ def parse_args() -> argparse.Namespace:
         "--enforce-eager",
         action="store_true",
         help="Disable torch.compile and force eager execution.",
+    )
+    parser.add_argument(
+        "--init-timeout",
+        type=int,
+        default=600,
+        help="Total timeout for orchestrator startup in seconds (default: 600s).",
+    )
+    parser.add_argument(
+        "--stage-init-timeout",
+        type=int,
+        default=300,
+        help="Timeout for initializing a single stage in seconds (default: 300s).",
     )
     parser.add_argument(
         "--enable-cpu-offload",
@@ -570,6 +582,8 @@ def main():
         enable_distributed_layerwise_offload=args.enable_distributed_layerwise_offload,
         dlo_use_allgather=args.dlo_use_allgather,
         dlo_resident_layers=args.dlo_resident_layers,
+        init_timeout=args.init_timeout,
+        stage_init_timeout=args.stage_init_timeout,
     )
     if args.deploy_config:
         omni_kwargs["deploy_config"] = args.deploy_config

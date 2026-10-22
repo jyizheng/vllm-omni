@@ -18,6 +18,10 @@ class DiffusionSamplingParams(dict):
     pass
 
 
+class YuE2ModelSpecificParams(dict[str, str]):
+    """YuE2 music conditioning parameters."""
+
+
 class QwenTTSModelSpecificParams(dict):
     pass
 
@@ -37,6 +41,10 @@ MAX_TOTAL_REFERENCES = 12
 
 
 class VideoReferences(dict):
+    pass
+
+
+class LatentMaskEditing(dict):
     pass
 
 

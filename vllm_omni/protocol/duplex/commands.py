@@ -53,7 +53,9 @@ class AppendAudio(realtime_commands.AppendAudio):
     OpenAI's append is just base64 audio. The duplex lane also lets a client
     declare this chunk's own format and rate, whether it believes the chunk is
     speech, camera frames captured alongside it, and its timing --- all
-    additive, all ignored by a stock client.
+    additive, all ignored by a stock client. Empty ``audio`` with
+    ``video_frames`` is legal when session capabilities allow video without
+    required audio.
     """
 
     #: Model-neutral hints carried through from the wire (rms, vad, transcript hints ...).
@@ -119,6 +121,8 @@ class AckPlayback(RealtimeCommand):
     committed_ms: int | None = None
     response_id: str | None = None
     item_id: str | None = None
+    #: Stop playback at the committed cutoff instead of reporting progress.
+    truncate: bool = False
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

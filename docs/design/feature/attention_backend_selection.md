@@ -4,6 +4,9 @@ This document defines the selection and extension contract for diffusion
 attention backends. User-facing backend choices, installation, and tuning are
 in the [attention backend guides](../../user_guide/diffusion/attention_backends.md).
 
+The [execution contract PoC](attention_execution_contract_poc.md) describes the
+experimental post-selection capability and lifecycle contract from RFC #7226.
+
 ## Scope
 
 The contract applies to DiT and other diffusion attention layers. It is
@@ -100,6 +103,20 @@ backend's `get_name()`. It must subclass the **selected implementation**;
 incompatible platform implementations raise `TypeError`. Unselected overrides
 have no effect. Backend capabilities, constructor options, and shared
 parallel dispatch remain unchanged and must be honored by the specialization.
+
+For explicit block-sparse attention, the model owns tiling, routing and any
+compression correction. The shared provider layer consumes that mask, its
+logical block size and valid-token counts. It owns kernel availability,
+provider-specific sparse metadata, transport padding and execution. The cuDNN
+provider consumes tile64 or tile128 directly; selecting it does not change
+the model's top-k policy. Startup checks and execution use the same provider
+resolution path.
+
+The explicit Triton provider accepts H3 tile64/128 on SM80+ in BF16.
+For tile128 it expands the selected mask into 64-token compute blocks
+without recomputing top-k or splitting the softmax reduction. Ada tile128
+auto selection uses this provider. Explicit unsupported precision and
+missing-kernel errors remain startup failures, not runtime fallbacks.
 
 Use a new backend for a new provider/capability contract. `custom_attention`
 instead owns communication and requires `skip_sequence_parallel=True`.

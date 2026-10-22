@@ -34,6 +34,13 @@ self-check.
 - [`diffusion-perf-opt`](diffusion-perf-opt/SKILL.md): guides diffusion model
   performance optimization, including profiling traces, parallel strategies,
   stage timing analysis, and benchmark-driven tuning
+- [`diffusion-accuracy-test`](diffusion-accuracy-test/SKILL.md): adds or extends
+  image/video numerical accuracy tests with aligned references, scoped
+  tolerances, and explicit Buildkite Accuracy coverage
+- [`diffusion-perf-test`](diffusion-perf-test/SKILL.md): adds or extends
+  image/video performance-benchmark cases and their nightly/weekly Buildkite
+  Perf coverage, using the `run_benchmark.py` config schema and a fixed
+  measurement contract
 - [`find-simplifications`](find-simplifications/SKILL.md): finds evidence-backed
   opportunities to remove or merge dead, duplicated, speculative,
   over-generalized, or unnecessarily defensive vLLM-Omni code
@@ -59,6 +66,14 @@ self-check.
   wiring (`test-ready.yml`, `test-merge.yml`, `test-nightly.yml`,
   `test-weekly.yml`), and copy-paste local plus CI-like `pytest` commands; see
   `references/test-routing.md` for level-to-command mapping
+
+## MiniMax H3 Creative Skills
+
+The [portable H3 collection](../../.agents/skills/README.md) contains the prompt
+writing skill and eight creative workflows for product ads, 3D shorts, paper art,
+brand promos, music videos, co-op intros, and hand-drawn/live-action fusion.
+Same-named directories here link to the canonical `.agents/skills/` copies, so
+Claude Code and Codex use the same instructions and templates.
 
 ## Maintenance Guidelines
 

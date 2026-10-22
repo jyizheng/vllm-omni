@@ -15,12 +15,17 @@ import pytest
 from pytest_mock import MockerFixture
 from vllm.v1.engine.utils import EngineZmqAddresses
 
-from vllm_omni.config.omni_config import VllmOmniDiffusionStageConfig
+from vllm_omni.config.omni_config import (
+    VllmOmniDiffusionStageConfig,
+    normalize_and_validate_diffusion_engine_ingress_kwargs,
+)
 from vllm_omni.config.resolver import OmniConfigResolution
+from vllm_omni.engine.arg_utils import FRONTEND_ONLY_ID_FILTER
 from vllm_omni.engine.stage_engine_startup import StageReplicaResources
 from vllm_omni.engine.stage_runtime import StageEngineLaunch
 from vllm_omni.entrypoints.cli.serve import (
     OmniServeCommand,
+    _parse_stage_id,
     _parse_stage_overrides,
     run_headless,
 )
@@ -78,6 +83,25 @@ def test_serve_parser_accepts_no_async_chunk_and_marks_it_explicit() -> None:
     assert "api_server_count" not in explicit
 
 
+@pytest.mark.parametrize("option", ["vae_fast_path", "vae_encode_fast_path"])
+def test_serve_parser_accepts_vae_fast_path(option: str) -> None:
+    parser = TrackingArgumentParser()
+    subparsers = parser.add_subparsers(dest="subcommand")
+    OmniServeCommand().subparser_init(subparsers)
+
+    args = parser.parse_args(["serve", "fake-model", "--omni"])
+    assert getattr(args, option) == "lossless"
+    assert option not in args.get_explicit_kwargs_dict()
+
+    flag = "--" + option.replace("_", "-")
+    args = parser.parse_args(["serve", "fake-model", "--omni", flag, "channels_last"])
+    assert getattr(args, option) == "channels_last"
+    assert args.get_explicit_kwargs_dict()[option] == "channels_last"
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["serve", "fake-model", "--omni", flag, "fast"])
+
+
 def _parse_serve_args(argv: list[str]) -> TrackingNamespace:
     """Parse a ``serve`` argv through the real Omni parser, returning the
     TrackingNamespace (with ``explicit_keys``) that ``validate`` receives."""
@@ -85,6 +109,101 @@ def _parse_serve_args(argv: list[str]) -> TrackingNamespace:
     subparsers = parser.add_subparsers(dest="subcommand")
     OmniServeCommand().subparser_init(subparsers)
     return parser.parse_args(argv)
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        [],
+        ["--log-stats"],
+        ["--api-server-count", "2"],
+    ],
+)
+def test_serve_rejects_log_stats_without_stage_metrics(flags: list[str]) -> None:
+    args = _parse_serve_args(["serve", "fake-model", "--omni", "--no-collect-stage-metrics", *flags])
+
+    with pytest.raises(ValueError, match="--no-collect-stage-metrics requires --disable-log-stats"):
+        OmniServeCommand().validate(args)
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        ["--disable-log-stats"],
+        ["--log-stats", "--disable-log-stats"],
+        ["--headless"],
+        ["--headless", "--log-stats"],
+        ["--headless", "--log-stats", "--disable-log-stats"],
+    ],
+)
+def test_serve_accepts_disabled_stage_metrics_when_logging_is_disabled_or_headless(
+    flags: list[str], mocker: MockerFixture
+) -> None:
+    mocker.patch("vllm_omni.diffusion.utils.hf_utils.is_diffusion_model", return_value=False)
+    mocker.patch("vllm_omni.entrypoints.cli.serve.validate_parsed_serve_args")
+    args = _parse_serve_args(["serve", "fake-model", "--omni", "--no-collect-stage-metrics", *flags])
+
+    OmniServeCommand().validate(args)
+
+
+@pytest.mark.parametrize("value, expected", [("0", 0), ("none", FRONTEND_ONLY_ID_FILTER)])
+def test_parse_stage_id_valid_values(value: str, expected: int) -> None:
+    """Ensure --stage-id takes a non-negative int or an explicit 'none'."""
+    assert _parse_stage_id(value) == expected
+
+
+@pytest.mark.parametrize("value", ["-1", "abc"])
+def test_parse_stage_id_invalid_values(value: str) -> None:
+    """Ensure --stage-id rejects negatives and non-integers."""
+    with pytest.raises(argparse.ArgumentTypeError, match="non-negative integer or 'none'"):
+        _parse_stage_id(value)
+
+
+@pytest.mark.parametrize(
+    "extra_argv, match",
+    [
+        (["--headless"], "--stage-id none cannot be used with --headless"),
+        (["--omni-dp-size-local", "2"], "requires a numeric --stage-id"),
+    ],
+)
+def test_serve_validate_rejects_stage_id_none_combinations(extra_argv: list[str], match: str) -> None:
+    """Ensure --stage-id none is rejected where a local stage is required."""
+    args = _parse_serve_args(
+        [
+            "serve",
+            "fake-model",
+            "--omni",
+            "--stage-id",
+            "none",
+            "--omni-master-address",
+            "127.0.0.1",
+            "--omni-master-port",
+            "20000",
+            *extra_argv,
+        ]
+    )
+    with pytest.raises(ValueError, match=match):
+        OmniServeCommand().validate(args)
+
+
+def test_no_guardrails_is_only_forwarded_as_model_config(mocker: MockerFixture) -> None:
+    """The CLI alias must not reach the strict diffusion config validator."""
+    parser = TrackingArgumentParser()
+    subparsers = parser.add_subparsers(dest="subparser")
+    OmniServeCommand().subparser_init(subparsers)
+    args = parser.parse_args(["serve", "fake-model", "--omni", "--no-guardrails"])
+    assert args.get_explicit_kwargs_dict()["no_guardrails"] is True
+
+    # Keep the real CLI parser and config validator, but do not start a server.
+    args.headless = True
+    mocker.patch.dict("os.environ", {"VLLM_DISABLE_LOG_LOGO": "1"})
+    mocker.patch("vllm_omni.entrypoints.cli.serve.run_headless")
+    OmniServeCommand.cmd(args)
+
+    explicit = args.get_explicit_kwargs_dict()
+    normalized = normalize_and_validate_diffusion_engine_ingress_kwargs(explicit, stage_id=0)
+    assert normalized["model_config"]["guardrails"] is False
+    assert "no_guardrails" not in explicit
 
 
 def test_omni_serve_requires_model_when_none_provided() -> None:
@@ -403,7 +522,6 @@ def test_run_multi_api_server_omni_starts_workers_after_shared_engine_launch(moc
 
     manager = mocker.Mock()
     manager.processes = [mocker.Mock()]
-    manager.gather_actual_addresses.return_value = (primary_addresses.inputs, primary_addresses.outputs)
 
     mocker.patch.object(serve_module, "_build_multi_api_stage_runtime", return_value=runtime)
     mocker.patch.object(serve_module, "_wait_for_multi_api_server_completion")
@@ -417,9 +535,9 @@ def test_run_multi_api_server_omni_starts_workers_after_shared_engine_launch(moc
     assert args._omni_stage_client_configs is engine_launch.client_configs
     start_manager.assert_called_once()
     manager_kwargs = start_manager.call_args.kwargs
-    assert manager_kwargs["cleanup_timeout"] == 1
     assert manager_kwargs["num_servers"] == 2
-    assert manager_kwargs["input_addresses"] == ["ipc://input-0", "ipc://input-1"]
+    assert [listener.address for listener in manager_kwargs["input_listeners"]] == ["ipc://input-0", "ipc://input-1"]
+    assert [listener.address for listener in manager_kwargs["output_listeners"]] == ["ipc://output-0", "ipc://output-1"]
     assert manager_kwargs["target_server_fn"] is serve_module.run_omni_api_server_worker_proc
     assert engine_launch.watched_frontend_processes == manager.processes
     runtime.shutdown.assert_called_once_with()
@@ -431,34 +549,36 @@ def test_start_api_server_process_manager_cleans_up_partial_start(mocker: Mocker
 
     first_process = mocker.Mock(name="first_process")
     second_process = mocker.Mock(name="second_process")
-    first_process.pid = 1234
-    second_process.pid = None
     second_process.start.side_effect = RuntimeError("spawn failed")
-    parent_pipes = [mocker.Mock(name="parent_pipe_0"), mocker.Mock(name="parent_pipe_1")]
-    child_pipes = [mocker.Mock(name="child_pipe_0"), mocker.Mock(name="child_pipe_1")]
     spawn_context = mocker.Mock()
     spawn_context.Process.side_effect = [first_process, second_process]
-    spawn_context.Pipe.side_effect = list(zip(parent_pipes, child_pipes))
     mocker.patch("vllm.v1.utils.multiprocessing.get_context", return_value=spawn_context)
     shutdown = mocker.patch("vllm.v1.utils.shutdown")
 
+    def _listener(address: str):
+        return mocker.Mock(address=address, socket=None)
+
+    input_listeners = [_listener("ipc://input-0"), _listener("ipc://input-1")]
+    output_listeners = [_listener("ipc://output-0"), _listener("ipc://output-1")]
+
     with pytest.raises(RuntimeError, match="spawn failed"):
         serve_module._start_api_server_process_manager(
-            cleanup_timeout=1.5,
             listen_address="127.0.0.1:8000",
             sock=mocker.Mock(),
             args=argparse.Namespace(),
             num_servers=2,
-            input_addresses=["ipc://input-0", "ipc://input-1"],
-            output_addresses=["ipc://output-0", "ipc://output-1"],
+            input_listeners=input_listeners,
+            output_listeners=output_listeners,
             target_server_fn=mocker.Mock(),
         )
 
     first_process.start.assert_called_once_with()
     second_process.start.assert_called_once_with()
-    for pipe in parent_pipes:
-        pipe.close.assert_called_once_with()
-    shutdown.assert_called_once_with([first_process], timeout=1.5)
+    # Since upstream f226af0e11 the manager owns the rollback: it shuts down
+    # the processes it recorded and cleans every listener up.
+    shutdown.assert_called_once_with([first_process, second_process], timeout=None)
+    for listener in [*input_listeners, *output_listeners]:
+        listener.cleanup.assert_called_once_with()
 
 
 def test_wait_for_multi_api_server_completion_rejects_engine_failure(
