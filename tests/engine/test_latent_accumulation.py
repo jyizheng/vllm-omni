@@ -1,10 +1,11 @@
 """Regression tests for latent accumulation with terminal snapshots.
 
 Latent emissions are per-step chunks, except that a stop-token finish
-additionally delivers the full cumulative snapshot. The accumulator replaces
-the accumulated chunks only when the incoming payload provably contains them
-(at least as many rows, prefix bitwise-equal); anything else — single-row
-steps, equal-sized prefill slices, growing chunks — concatenates as before.
+additionally delivers the full cumulative snapshot. The producer declares the
+snapshot explicitly (``meta.full_payload_snapshot``, set where the full
+payload is materialized); the accumulator never infers emission semantics
+from tensor values, because values cannot distinguish a snapshot from a
+legitimate identical next chunk.
 """
 
 import pytest
@@ -16,6 +17,8 @@ from vllm_omni.outputs.output_processor import OmniRequestState
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
+_SNAPSHOT_FLAG = {"meta.full_payload_snapshot": torch.ones((), dtype=torch.bool)}
+
 
 class _FakeState:
     """Carries just the attributes add_multimodal_tensor needs."""
@@ -24,8 +27,9 @@ class _FakeState:
         self.mm_type = None
         self.mm_accumulated = MultimodalPayload()
 
-    def add(self, tensor):
-        OmniRequestState.add_multimodal_tensor(self, {"latent": tensor}, "latent")
+    def add(self, tensor, *, snapshot=False):
+        payload = {"latent": tensor, **(_SNAPSHOT_FLAG if snapshot else {})}
+        OmniRequestState.add_multimodal_tensor(self, payload, "latent")
 
     def consolidated(self):
         self.mm_accumulated.consolidate_tensors(OutputModality.LATENT)
@@ -44,53 +48,52 @@ def test_per_step_chunks_concatenate():
     assert torch.equal(out, torch.cat([prefill, *chunks], dim=0))
 
 
-def test_one_row_then_one_row_concatenates():
-    # A one-token prompt: one prefill row, then a one-row decode step. The
-    # decode step has equal length but a different prefix, so it must append.
+def test_identical_consecutive_chunks_concatenate():
+    # Two legitimate chunks with bitwise-identical values must both land:
+    # no value heuristic may mistake the second for a cumulative snapshot.
     state = _FakeState()
-    prefill = torch.randn(1, 8)
-    step = torch.randn(1, 8)
-    state.add(prefill.clone())
-    state.add(step.clone())
+    row = torch.randn(1, 8)
+    state.add(row.clone())
+    state.add(row.clone())
     out = state.consolidated()
     assert out.shape == (2, 8)
-    assert torch.equal(out, torch.cat([prefill, step], dim=0))
+    assert torch.equal(out, torch.cat([row, row], dim=0))
 
 
-def test_equal_sized_prefill_slices_concatenate():
-    # Two 32-row chunked-prefill slices with distinct contents.
+def test_identical_equal_sized_prefill_slices_concatenate():
     state = _FakeState()
-    s1, s2 = torch.randn(32, 8), torch.randn(32, 8)
-    state.add(s1.clone())
-    state.add(s2.clone())
+    s = torch.randn(32, 8)
+    state.add(s.clone())
+    state.add(s.clone())
     out = state.consolidated()
     assert out.shape == (64, 8)
-    assert torch.equal(out, torch.cat([s1, s2], dim=0))
+    assert torch.equal(out, torch.cat([s, s], dim=0))
 
 
-def test_growing_chunks_concatenate():
-    # A longer chunk that does not duplicate the accumulated prefix appends.
+def test_unflagged_superset_still_concatenates():
+    # Even a payload that bitwise-contains the accumulated prefix appends
+    # unless the producer flagged it: emission semantics come from the
+    # producer, not from tensor values.
     state = _FakeState()
-    s1, s2 = torch.randn(4, 8), torch.randn(8, 8)
+    s1 = torch.randn(4, 8)
+    tail = torch.randn(2, 8)
     state.add(s1.clone())
-    state.add(s2.clone())
+    state.add(torch.cat([s1, tail], dim=0))
     out = state.consolidated()
-    assert out.shape == (12, 8)
-    assert torch.equal(out, torch.cat([s1, s2], dim=0))
+    assert out.shape == (10, 8)
 
 
-def test_terminal_snapshot_supersedes_chunks():
-    # Stop-token finish: the final flush delivers the full cumulative
-    # snapshot (prefix bitwise-equal to the accumulated chunks, plus the
-    # trailing steps). It must replace the chunks, not be appended.
+def test_flagged_terminal_snapshot_supersedes_chunks():
+    # Stop-token finish: the materialized full payload carries the explicit
+    # snapshot flag and replaces the accumulated chunks.
     state = _FakeState()
     prefill = torch.randn(40, 8)
     steps = [torch.randn(1, 8) for _ in range(10)]
     state.add(prefill.clone())
     for c in steps:
         state.add(c.clone())
-    snapshot = torch.cat([prefill, *steps, torch.randn(2, 8)], dim=0)  # + 2 trailing rows
-    state.add(snapshot.clone())
+    snapshot = torch.cat([prefill, *steps, torch.randn(2, 8)], dim=0)
+    state.add(snapshot.clone(), snapshot=True)
     out = state.consolidated()
     assert out.shape == (52, 8)
     assert torch.equal(out, snapshot)
@@ -99,5 +102,20 @@ def test_terminal_snapshot_supersedes_chunks():
 def test_single_snapshot_passthrough():
     state = _FakeState()
     snapshot = torch.randn(4199, 8)
-    state.add(snapshot.clone())
+    state.add(snapshot.clone(), snapshot=True)
     assert torch.equal(state.consolidated(), snapshot)
+
+
+def test_materialize_full_payload_entry_sets_flag():
+    from vllm_omni.distributed.omni_connectors.model_runner.omni_connector_payload_transport import (
+        _OmniConnectorPayloadTransportMixin,
+    )
+
+    chunks = {"hidden": [torch.randn(3, 8), torch.randn(1, 8)]}
+    output, request = _OmniConnectorPayloadTransportMixin._materialize_full_payload_entry(
+        (chunks, {}, 4, "req")
+    )
+    assert output["hidden"].shape == (4, 8)
+    flag = output["meta.full_payload_snapshot"]
+    assert isinstance(flag, torch.Tensor) and bool(flag)
+    assert request == "req"

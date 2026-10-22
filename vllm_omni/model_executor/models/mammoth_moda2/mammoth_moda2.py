@@ -128,7 +128,22 @@ def moe_forward(
     if gen_expert is None:
         return und_expert(hidden_states)
 
-    if gen_token_mask is None or not gen_token_mask.any():
+    if gen_token_mask is None:
+        return und_expert(hidden_states)
+    # The branches below read the mask on the host (`.any()`/`.all()`/`.item()`)
+    # and index data-dependently, none of which a CUDA graph can capture
+    # faithfully: capture would freeze whichever branch the capture batch
+    # takes. Refuse loudly instead of recording a wrong expert. Full-graph
+    # capture is still valid for this model because the omni runner feeds the
+    # decoder inputs_embeds (input_ids=None), so captured forwards take the
+    # mask-is-None path above — identical to eager.
+    if gen_token_mask.is_cuda and torch.cuda.is_current_stream_capturing():
+        raise RuntimeError(
+            "moe_forward routes on gen_token_mask with host-side branches and "
+            "cannot be captured into a CUDA graph; capture must use the "
+            "inputs_embeds path (gen_token_mask=None) or run eagerly"
+        )
+    if not gen_token_mask.any():
         return und_expert(hidden_states)
     if gen_token_mask.all():
         return gen_expert(hidden_states)
